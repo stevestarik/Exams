@@ -1,0 +1,33 @@
+---
+- name: Deploy Local Project and Run Docker Compose
+  hosts: home
+  become: true
+  
+  vars:
+    local_project_path: "../app"
+    remote_project_path: "/home/ansible/my_project"
+  tasks:
+    - name: Ensure the remote project directory exists
+      ansible.builtin.file:
+        path: "{{ remote_project_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy local project files to the remote server
+      ansible.builtin.copy:
+        src: "{{ local_project_path }}/"
+        dest: "{{ remote_project_path }}/"
+        owner: steve
+        group: steve
+        mode: '0644'
+
+    - name: Ensure Docker Compose stack is running
+      community.docker.docker_compose_v2:
+        project_src: "{{ remote_project_path }}"
+        state: present
+        build: always
+      register: compose_output
+
+    - name: Display Docker Compose execution status
+      ansible.builtin.debug:
+        msg: "Docker Compose deployed successfully. Actions taken: {{ compose_output.actions }}"
