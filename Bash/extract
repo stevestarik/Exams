@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+
+#===============================================================================
+# Script: extract
+# Synopsis: extract [-h] [-r] [-v] file [file...]
+# Description:
+#   Unpacks multiple packed files and optionally traverses directories
+#   recursively to unpack all archives regardless of file extension,
+#   detecting compression format via the `file` command.
+#   Supported tools: gunzip, bunzip2, unzip, uncompress
+#===============================================================================
+
+VERBOSE=false
+RECURSIVE=false
+DECOMPRESSED_COUNT=0
+NOT_DECOMPRESSED_COUNT=0
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [-h] [-r] [-v] file [file...]
+
+Unpack multiple compressed files or directories using the 'file' command
+to automatically detect the compression algorithm.
+
+Options:
+  -h    Display this help message and exit
+  -r    Recursively traverse directories and unpack archives inside them
+  -v    Verbose mode: echo each file decompressed and warn for each file
+        that was NOT decompressed
+EOF
+}
+
+log_decompressed() {
+    local target="$1"
+    if [[ "$VERBOSE" == true ]]; then
+        echo "Unpacked: $target"
+    fi
+}
+
+warn_not_decompressed() {
+    local target="$1"
+    local reason="${2:-not a supported archive}"
+    if [[ "$VERBOSE" == true ]]; then
+        echo "Warning: '$target' was NOT decompressed ($reason)." >&2
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# unpack_file <filepath>
+# Detects compression type via `file -b` and invokes the matching unpacker.
+# Adding new unpacking options only requires adding a case branch here.
+#-------------------------------------------------------------------------------
+unpack_file() {
+    local filepath="$1"
+    local dir
+    dir="$(dirname "$filepath")"
+    local file_type
+    file_type="$(file -b -- "$filepath" 2>/dev/null)"
+
+    local status=1
+
+    case "$file_type" in
+        *"gzip compressed"*)
+            if [[ "$filepath" == *.gz || "$filepath" == *.tgz || "$filepath" == *.taz ]]; then
+                gunzip -f -- "$filepath"
+                status=$?
+            else
+                mv -f -- "$filepath" "${filepath}.gz" && gunzip -f -- "${filepath}.gz"
+                status=$?
+                [[ $status -ne 0 && -e "${filepath}.gz" ]] && mv -f -- "${filepath}.gz" "$filepath"
+            fi
+            ;;
+        *"bzip2 compressed"*)
+            if [[ "$filepath" == *.bz2 || "$filepath" == *.bz || "$filepath" == *.tbz2 || "$filepath" == *.tbz ]]; then
+                bunzip2 -f -- "$filepath"
+                status=$?
+            else
+                mv -f -- "$filepath" "${filepath}.bz2" && bunzip2 -f -- "${filepath}.bz2"
+                status=$?
+                [[ $status -ne 0 && -e "${filepath}.bz2" ]] && mv -f -- "${filepath}.bz2" "$filepath"
+            fi
+            ;;
+        *"Zip archive"*)
+            # -j: junk paths (extract files directly into $dir without inner folder structure)
+            # -o: overwrite existing files without prompting
+            # -q: quiet mode
+            unzip -j -o -q -- "$filepath" -d "$dir"
+            status=$?
+            ;;
+        *"compress'd data"*)
+            if [[ "$filepath" == *.Z ]]; then
+                uncompress -f -- "$filepath"
+                status=$?
+            else
+                mv -f -- "$filepath" "${filepath}.Z" && uncompress -f -- "${filepath}.Z"
+                status=$?
+                [[ $status -ne 0 && -e "${filepath}.Z" ]] && mv -f -- "${filepath}.Z" "$filepath"
+            fi
+            ;;
+        *)
+            warn_not_decompressed "$filepath" "not compressed"
+            ((NOT_DECOMPRESSED_COUNT++))
+            return 1
+            ;;
+    esac
+
+    if [[ $status -eq 0 ]]; then
+        ((DECOMPRESSED_COUNT++))
+        log_decompressed "$filepath"
+        return 0
+    else
+        warn_not_decompressed "$filepath" "decompression failed"
+        ((NOT_DECOMPRESSED_COUNT++))
+        return 1
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# process_directory <dirpath>
+# Unpacks files inside a directory; recurses into subdirectories if -r is set.
+#-------------------------------------------------------------------------------
+process_directory() {
+    local dirpath="${1%/}"
+    local entry
+
+    shopt -s nullglob
+    local entries=("$dirpath"/*)
+    shopt -u nullglob
+
+    for entry in "${entries[@]}"; do
+        if [[ -d "$entry" ]]; then
+            if [[ "$RECURSIVE" == true ]]; then
+                process_directory "$entry"
+            fi
+        elif [[ -f "$entry" ]]; then
+            unpack_file "$entry"
+        fi
+    done
+}
+
+#-------------------------------------------------------------------------------
+# process_target <target>
+# Handles each CLI target argument (file or directory).
+#-------------------------------------------------------------------------------
+process_target() {
+    local target="$1"
+
+    if [[ ! -e "$target" ]]; then
+        warn_not_decompressed "$target" "No such file or directory"
+        ((NOT_DECOMPRESSED_COUNT++))
+        return 1
+    fi
+
+    if [[ -d "$target" ]]; then
+        process_directory "$target"
+    elif [[ -f "$target" ]]; then
+        unpack_file "$target"
+    else
+        warn_not_decompressed "$target" "unsupported file type"
+        ((NOT_DECOMPRESSED_COUNT++))
+    fi
+}
+
+# Parse command-line switches
+while getopts ":hrv" opt; do
+    case "$opt" in
+        h)
+            usage
+            exit 0
+            ;;
+        r)
+            RECURSIVE=true
+            ;;
+        v)
+            VERBOSE=true
+            ;;
+        \?)
+            echo "Error: Invalid option -$OPTARG" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+# Require at least one file/directory argument
+if [[ $# -eq 0 ]]; then
+    usage >&2
+    exit 1
+fi
+
+for target in "$@"; do
+    process_target "$target"
+done
+
+echo "Decompressed $DECOMPRESSED_COUNT archive(s)"
+exit "$NOT_DECOMPRESSED_COUNT"
