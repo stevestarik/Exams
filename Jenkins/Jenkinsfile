@@ -1,0 +1,93 @@
+@Library('my-shared-library') _
+
+pipeline {
+    agent any
+
+    triggers {
+        pollSCM('H/5 * * * *')
+    }
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+    }
+
+    environment {
+        REPO_URL = 'https://nexus.example.com/repository/releases-local/my-app'
+        REPO_CREDENTIALS_ID = 'nexus-deploy-credentials'
+    }
+
+    stages {
+        stage('Prepare Environment') {
+            steps {
+                script {
+                    def scmInfo = prepareEnv(appName: 'trading-engine')
+                    
+                    echo "Triggered by commit from: ${scmInfo.committerName} (${scmInfo.committerEmail})"
+                    echo "Commit message: ${env.SCM_COMMIT_MSG}"
+                }
+            }
+        }
+
+        stage('Build Artifact') {
+            steps {
+                echo "Building application version ${env.ARTIFACT_VERSION}..."
+                sh '''
+                    mkdir -p build/output
+                    echo "Application Binary Placeholder" > build/output/app.bin
+                    cat <<EOF > build/output/build-info.json
+                    {
+                        "version": "${ARTIFACT_VERSION}",
+                        "committer": "${SCM_COMMITTER_NAME}",
+                        "email": "${SCM_COMMITTER_EMAIL}",
+                        "commit": "${SCM_COMMIT_HASH}",
+                        "branch": "${SCM_BRANCH}"
+                    }
+EOF
+                '''
+            }
+        }
+
+        stage('Pack Artifact') {
+            steps {
+                echo "Packing artifact into ${env.ARTIFACT_NAME}..."
+                sh '''
+                    tar -czvf "${ARTIFACT_NAME}" -C build/output .
+                    ls -lh "${ARTIFACT_NAME}"
+                '''
+            }
+        }
+
+        stage('Upload to Repository') {
+            steps {
+                echo "Uploading ${env.ARTIFACT_NAME} to ${env.REPO_URL}..."
+                withCredentials([usernamePassword(
+                    credentialsId: env.REPO_CREDENTIALS_ID,
+                    usernameVariable: 'REPO_USER',
+                    passwordVariable: 'REPO_PASS'
+                )]) {
+                    sh '''
+                        curl --fail -u "${REPO_USER}:${REPO_PASS}" \
+                             --upload-file "${ARTIFACT_NAME}" \
+                             "${REPO_URL}/${ARTIFACT_NAME}"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Cleaning up local workspace artifacts..."
+            sh 'rm -f *.tar.gz && rm -rf build/'
+        }
+        success {
+            echo "Pipeline succeeded! Artifact ${env.ARTIFACT_NAME} (committed by ${env.SCM_COMMITTER_NAME}) was uploaded."
+        }
+        failure {
+            echo "Pipeline failed for commit ${env.SCM_SHORT_COMMIT} by ${env.SCM_COMMITTER_NAME}."
+        }
+    }
+}
